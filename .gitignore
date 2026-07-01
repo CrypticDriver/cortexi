@@ -1,0 +1,14 @@
+# secrets / local config — never commit
+mac-app/config.json
+*.local.json
+.env
+*.pem
+*.key
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+# os
+.DS_Store
+dist/

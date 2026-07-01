@@ -1,0 +1,15 @@
+{
+  "server_url": "https://REPLACE_WITH_CLOUDFRONT_DOMAIN.cloudfront.net",
+  "app_token": "REPLACE_WITH_APP_TOKEN",
+  "ui_port": 8787,
+  "whisper": {
+    "model_path": "~/.meeting-copilot/whisper/ggml-medium.bin",
+    "whisper_cli": "~/.meeting-copilot/whisper.cpp/build/bin/whisper-cli",
+    "language": "zh",
+    "segment_seconds": 45
+  },
+  "audio": {
+    "capture_device": "MeetingCopilot-Aggregate",
+    "sample_rate": 16000
+  }
+}

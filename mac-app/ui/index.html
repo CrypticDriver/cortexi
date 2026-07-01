@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>🧠 CortexI</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --border:#262b36; --fg:#e6e9ef; --mut:#8b93a3; --acc:#5b9dff; --ok:#3ecf8e; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif; background:var(--bg); color:var(--fg); }
+  header { padding:14px 20px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:12px; position:sticky; top:0; background:var(--bg); }
+  header h1 { font-size:16px; margin:0; }
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--mut); }
+  .dot.rec { background:#ff4d4f; animation:pulse 1.2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+  .wrap { display:grid; grid-template-columns: 1fr 380px; gap:16px; padding:16px 20px; max-width:1200px; }
+  .panel { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:14px 16px; }
+  .panel h2 { font-size:12px; letter-spacing:.5px; color:var(--mut); text-transform:uppercase; margin:0 0 10px; }
+  #transcript { max-height:52vh; overflow:auto; }
+  .seg { padding:6px 0; border-bottom:1px dashed var(--border); }
+  .seg:last-child { border-bottom:none; }
+  .files span { display:inline-block; background:#20242e; border:1px solid var(--border); border-radius:8px; padding:3px 9px; margin:3px 4px 3px 0; font-size:12px; }
+  .qa { border-left:2px solid var(--acc); padding:4px 0 4px 10px; margin:10px 0; }
+  .qa .q { color:var(--acc); font-weight:600; }
+  .qa .a { white-space:pre-wrap; }
+  #summary { white-space:pre-wrap; }
+  .askbar { display:flex; gap:8px; margin-top:10px; }
+  input[type=text] { flex:1; background:#0c0e12; border:1px solid var(--border); color:var(--fg); border-radius:8px; padding:9px 11px; font-size:14px; }
+  button { background:var(--acc); color:#04122b; border:none; border-radius:8px; padding:9px 14px; font-weight:600; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--mut); border:1px solid var(--border); }
+  .empty { color:var(--mut); font-style:italic; }
+</style>
+</head>
+<body>
+<header>
+  <span>🧠</span>
+  <h1>CortexI</h1>
+  <span id="dot" class="dot"></span>
+  <span id="status" class="empty">未录音</span>
+  <span id="title" style="margin-left:auto;color:var(--mut)"></span>
+</header>
+
+<div class="wrap">
+  <div>
+    <div class="panel">
+      <h2>实时转写</h2>
+      <div id="transcript"><div class="empty">开始录音后，本地转写会实时出现在这里（音频不出本机）。</div></div>
+    </div>
+    <div class="panel" style="margin-top:16px">
+      <h2>会后总结</h2>
+      <div id="summary"><div class="empty">点菜单栏『📝 会后总结』生成结构化纪要。</div></div>
+    </div>
+  </div>
+
+  <div>
+    <div class="panel">
+      <h2>已上传文件 / 图片</h2>
+      <div id="files" class="files"><span class="empty" style="border:none;background:none">无</span></div>
+    </div>
+    <div class="panel" style="margin-top:16px">
+      <h2>实时问答（基于目前上下文）</h2>
+      <div id="qas"><div class="empty">开会中随时问，比如「刚才决定了什么？」</div></div>
+      <div class="askbar">
+        <input id="q" type="text" placeholder="问一句…" onkeydown="if(event.key==='Enter')ask()">
+        <button onclick="ask()">问</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function esc(s){ return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+
+async function refresh(){
+  try{
+    const r = await fetch('/state'); const s = await r.json();
+    // status
+    document.getElementById('dot').className = 'dot' + (s.recording?' rec':'');
+    document.getElementById('status').textContent = s.recording?'录音中':'未录音';
+    document.getElementById('status').className = s.recording?'':'empty';
+    document.getElementById('title').textContent = s.title||'';
+    // transcript
+    const t = document.getElementById('transcript');
+    if(s.transcript && s.transcript.length){
+      t.innerHTML = s.transcript.map(x=>`<div class="seg">${esc(x.text)}</div>`).join('');
+      t.scrollTop = t.scrollHeight;
+    }
+    // files
+    const f = document.getElementById('files');
+    if(s.files && s.files.length){ f.innerHTML = s.files.map(x=>`<span>📎 ${esc(x.name)}</span>`).join(''); }
+    // answers
+    const qa = document.getElementById('qas');
+    if(s.answers && s.answers.length){
+      qa.innerHTML = s.answers.map(x=>`<div class="qa"><div class="q">Q: ${esc(x.q)}</div><div class="a">${esc(x.a)}</div></div>`).join('');
+    }
+    // summary
+    if(s.summary){ document.getElementById('summary').textContent = s.summary; }
+  }catch(e){}
+}
+
+async function ask(){
+  const el = document.getElementById('q'); const q = el.value.trim(); if(!q) return;
+  el.value=''; el.disabled=true;
+  const qa = document.getElementById('qas');
+  qa.insertAdjacentHTML('beforeend', `<div class="qa"><div class="q">Q: ${esc(q)}</div><div class="a">思考中…</div></div>`);
+  try{
+    const r = await fetch('/ask',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:q})});
+    const d = await r.json();
+  }catch(e){}
+  el.disabled=false; el.focus(); refresh();
+}
+
+setInterval(refresh, 2000); refresh();
+</script>
+</body>
+</html>

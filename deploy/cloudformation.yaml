@@ -1,0 +1,279 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CortexI (副脑一代) server stack — private EC2 running the CortexI FastAPI server,
+  fronted by an internet-facing ALB that ONLY accepts traffic from CloudFront
+  (managed prefix list + shared secret header), plus a CloudFront distribution.
+  Analysis brain = Claude Code (headless) via Amazon Bedrock.
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: t3.large
+    Description: EC2 instance type for the CortexI server.
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC to deploy into (must have at least 2 public subnets for the ALB).
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Two or more subnets across different AZs for the ALB.
+  ServerSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Subnet to place the EC2 server in (can be private; needs outbound to Bedrock + SSM).
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Amazon Linux 2023 AMI (auto-resolved).
+  BedrockRegion:
+    Type: String
+    Default: us-east-2
+    Description: Region whose Bedrock endpoint Claude Code should use.
+  AppToken:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: >
+      Bearer token clients must send. Leave blank to auto-generate one
+      (retrieve it from the stack Outputs / SSM parameter after deploy).
+  CloudFrontPrefixList:
+    Type: String
+    Default: pl-b6a144df
+    Description: >
+      CloudFront origin-facing managed prefix list id for THIS region.
+      us-east-1/us-east-2 = pl-b6a144df (varies per region; see README lookup cmd).
+  GitHubRepo:
+    Type: String
+    Default: CrypticDriver/cortexi
+    Description: owner/repo to pull server/app.py from (raw.githubusercontent.com, main branch).
+
+Conditions:
+  GenerateToken: !Equals [!Ref AppToken, '']
+
+Resources:
+
+  # ---------------- secrets ----------------
+  OriginVerifySecret:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/cortexi/${AWS::StackName}/origin-verify'
+      Type: String
+      Value: !Select [2, !Split ['/', !Ref AWS::StackId]]  # stack-unique random-ish
+
+  AppTokenParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/cortexi/${AWS::StackName}/app-token'
+      Type: String
+      Value: !If
+        - GenerateToken
+        - !Select [4, !Split ['/', !Ref AWS::StackId]]
+        - !Ref AppToken
+
+  # ---------------- IAM ----------------
+  ServerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: bedrock-invoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: '*'
+        - PolicyName: read-cortexi-ssm
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource:
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/cortexi/${AWS::StackName}/*'
+
+  ServerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref ServerRole]
+
+  # ---------------- security groups ----------------
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: CortexI ALB - CloudFront origin-facing only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourcePrefixListId: !Ref CloudFrontPrefixList
+          Description: CloudFront origin-facing only
+
+  ServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: CortexI server - app port from ALB only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+          Description: App port from ALB
+
+  # NOTE: CloudFront managed prefix list id differs per region; resolved below.
+
+  # ---------------- ALB ----------------
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub 'cortexi-${AWS::StackName}'
+      Type: application
+      Scheme: internet-facing
+      Subnets: !Ref SubnetIds
+      SecurityGroups: [!Ref AlbSecurityGroup]
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Protocol: HTTP
+      Port: 8000
+      TargetType: instance
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 15
+      HealthyThresholdCount: 2
+      Targets:
+        - Id: !Ref ServerInstance
+          Port: 8000
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: '403'
+            ContentType: text/plain
+            MessageBody: forbidden
+
+  # Only forward when the CloudFront-injected secret header matches.
+  ListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref Listener
+      Priority: 10
+      Conditions:
+        - Field: http-header
+          HttpHeaderConfig:
+            HttpHeaderName: X-Origin-Verify
+            Values:
+              - !GetAtt OriginVerifySecret.Value
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # ---------------- CloudFront ----------------
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub 'CortexI ${AWS::StackName} - fronts private ALB'
+        PriceClass: PriceClass_All
+        Origins:
+          - Id: cortexi-alb
+            DomainName: !GetAtt LoadBalancer.DNSName
+            CustomOriginConfig:
+              HTTPPort: 80
+              OriginProtocolPolicy: http-only
+              OriginReadTimeout: 60
+              OriginKeepaliveTimeout: 60
+            OriginCustomHeaders:
+              - HeaderName: X-Origin-Verify
+                HeaderValue: !GetAtt OriginVerifySecret.Value
+        DefaultCacheBehavior:
+          TargetOriginId: cortexi-alb
+          ViewerProtocolPolicy: https-only
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+          CachedMethods: [GET, HEAD]
+          Compress: false
+          # Managed policies: CachingDisabled + AllViewer
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+          OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3
+
+  # ---------------- EC2 server ----------------
+  ServerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref LatestAmiId
+      IamInstanceProfile: !Ref ServerInstanceProfile
+      SubnetId: !Ref ServerSubnetId
+      SecurityGroupIds: [!Ref ServerSecurityGroup]
+      Tags:
+        - Key: Name
+          Value: !Sub 'cortexi-server-${AWS::StackName}'
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -xe
+          dnf install -y python3 python3-pip git nodejs npm
+          # --- Claude Code (headless, Bedrock) ---
+          npm install -g @anthropic-ai/claude-code || true
+          CLAUDE_BIN=$(command -v claude || echo /usr/bin/claude)
+          # --- CortexI server ---
+          mkdir -p /opt/cortexi/server /home/ec2-user/cortexi-data
+          curl -fsSL https://raw.githubusercontent.com/${GitHubRepo}/main/server/app.py -o /opt/cortexi/server/app.py
+          python3 -m venv /opt/cortexi/venv
+          /opt/cortexi/venv/bin/pip install -q --upgrade pip
+          /opt/cortexi/venv/bin/pip install -q fastapi 'uvicorn[standard]' python-multipart pydantic
+          # --- token ---
+          APP_TOKEN="$(aws ssm get-parameter --name /cortexi/${AWS::StackName}/app-token --query Parameter.Value --output text --region ${AWS::Region})"
+          ORIGIN_VERIFY="$(aws ssm get-parameter --name /cortexi/${AWS::StackName}/origin-verify --query Parameter.Value --output text --region ${AWS::Region})"
+          cat > /etc/systemd/system/cortexi.service <<UNIT
+          [Unit]
+          Description=CortexI Server
+          After=network-online.target
+          Wants=network-online.target
+          [Service]
+          Type=simple
+          Environment=MC_APP_TOKEN=$APP_TOKEN
+          Environment=MC_ORIGIN_VERIFY=$ORIGIN_VERIFY
+          Environment=MC_DATA_DIR=/home/ec2-user/cortexi-data
+          Environment=MC_BEDROCK_REGION=${BedrockRegion}
+          Environment=MC_CLAUDE_BIN=$CLAUDE_BIN
+          Environment=CLAUDE_CODE_USE_BEDROCK=1
+          Environment=AWS_REGION=${BedrockRegion}
+          WorkingDirectory=/opt/cortexi/server
+          ExecStart=/opt/cortexi/venv/bin/uvicorn app:app --host 0.0.0.0 --port 8000
+          Restart=always
+          RestartSec=3
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+          systemctl daemon-reload
+          systemctl enable --now cortexi
+
+Outputs:
+  CloudFrontURL:
+    Description: Client server_url (put this in mac-app/config.json)
+    Value: !Sub 'https://${Distribution.DomainName}'
+  AppTokenParam:
+    Description: Retrieve the app token (if auto-generated) from SSM
+    Value: !Sub '/cortexi/${AWS::StackName}/app-token'
+  InstanceId:
+    Value: !Ref ServerInstance
+  AlbDNS:
+    Value: !GetAtt LoadBalancer.DNSName
