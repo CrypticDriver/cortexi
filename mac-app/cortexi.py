@@ -25,10 +25,29 @@ from audio import Transcriber
 
 HERE = Path(__file__).resolve().parent
 
-# Config lives in the user's home dir so it survives app upgrades and stays
-# writable even when running from inside a read-only .app bundle.
-CONFIG_DIR = Path.home() / ".meeting-copilot"
-CONFIG_PATH = CONFIG_DIR / "config.json"
+# Config resolution (fixed 2026-07-01): prefer the config.json sitting next to
+# the source (mac-app/config.json) because that is what users naturally edit.
+# Fall back to the home-dir copy only when the local one is not writable/present
+# (e.g. running from inside a read-only .app bundle).
+LOCAL_CONFIG_PATH = HERE / "config.json"
+HOME_CONFIG_DIR = Path.home() / ".meeting-copilot"
+HOME_CONFIG_PATH = HOME_CONFIG_DIR / "config.json"
+
+
+def _active_config_path():
+    """The config file we actually read/write.
+
+    Rule: if a config.json exists next to the source, that one wins (matches
+    user intuition). Otherwise use the home-dir copy (survives .app upgrades).
+    """
+    if LOCAL_CONFIG_PATH.exists():
+        return LOCAL_CONFIG_PATH
+    return HOME_CONFIG_PATH
+
+
+# Backwards-compatible aliases (other code references these names)
+CONFIG_DIR = HOME_CONFIG_DIR
+CONFIG_PATH = _active_config_path()
 
 
 def _find_ui_dir():
@@ -69,17 +88,10 @@ DEFAULT_CONFIG = {
 
 def load_config():
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
-    # one-time seed: if user config absent but a legacy ./config.json exists, adopt it
-    legacy = HERE / "config.json"
-    if not CONFIG_PATH.exists() and legacy.exists():
+    path = _active_config_path()
+    if path.exists():
         try:
-            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            CONFIG_PATH.write_text(legacy.read_text())
-        except Exception:
-            pass
-    if CONFIG_PATH.exists():
-        try:
-            user = json.loads(CONFIG_PATH.read_text() or "{}")
+            user = json.loads(path.read_text() or "{}")
         except Exception:
             user = {}
         for k, v in user.items():
@@ -91,8 +103,16 @@ def load_config():
 
 
 def save_config(cfg):
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
+    # Write back to whichever config is active so edits round-trip to the same
+    # file the user sees. Prefer the local source-dir copy.
+    path = _active_config_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
+    except Exception:
+        # local dir not writable (read-only .app bundle) -> fall back to home
+        HOME_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        HOME_CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
 
 
 class AppState:
