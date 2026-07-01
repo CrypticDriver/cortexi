@@ -43,6 +43,17 @@ class RemoteClient:
             self.meeting_id = None
         return r.json()
 
+    def rename(self, mid, title):
+        """Rename a session on the server."""
+        r = requests.post(
+            f"{self.base}/session/{mid}/rename",
+            headers=self._headers({"Content-Type": "application/json"}),
+            data=json.dumps({"title": title}),
+            timeout=15,
+        )
+        r.raise_for_status()
+        return r.json()
+
     def start(self, title=None):
         r = requests.post(
             f"{self.base}/session/start",

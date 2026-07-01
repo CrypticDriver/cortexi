@@ -124,8 +124,13 @@ async def _publish(mid: str, event: dict):
 
 
 # ---------------- claude invocation ----------------
+# Each meeting is bound to ONE persistent Claude Code session (B design,
+# 2026-07-01). First call to that session uses `--session-id <uuid>` to create
+# it; every subsequent call uses `--resume <uuid>` so Claude Code keeps the full
+# meeting in its own conversation memory — no need to re-stuff / truncate the
+# whole transcript on every ask/summarize.
 def _run_claude(prompt: str) -> str:
-    """Call Claude Code headless via Bedrock. Blocking; run in threadpool."""
+    """One-shot Claude Code call (no session). Blocking; run in threadpool."""
     env = dict(os.environ)
     env["CLAUDE_CODE_USE_BEDROCK"] = "1"
     env["AWS_REGION"] = AWS_REGION
@@ -140,6 +145,62 @@ def _run_claude(prompt: str) -> str:
     except subprocess.TimeoutExpired:
         return "[error] claude timed out"
     out = (proc.stdout or "").strip()
+    if not out and proc.stderr:
+        return f"[error] {proc.stderr.strip()[:500]}"
+    return out
+
+
+def _run_claude_session(mid: str, prompt: str) -> str:
+    """Call Claude Code inside the meeting's persistent session.
+
+    The very first call for a meeting creates the session with --session-id;
+    all later calls --resume it, so Claude Code carries the whole meeting
+    context in its own memory. Blocking; run in threadpool.
+    """
+    s = SESSIONS.get(mid)
+    if not s:
+        return _run_claude(prompt)
+    cc_sid = s.get("cc_session_id")
+    if not cc_sid:
+        cc_sid = str(uuid.uuid4())
+        s["cc_session_id"] = cc_sid
+        s["cc_started"] = False
+
+    env = dict(os.environ)
+    env["CLAUDE_CODE_USE_BEDROCK"] = "1"
+    env["AWS_REGION"] = AWS_REGION
+
+    if s.get("cc_started"):
+        args = [CLAUDE_BIN, "--resume", cc_sid, "-p", prompt]
+    else:
+        args = [CLAUDE_BIN, "--session-id", cc_sid, "-p", prompt]
+
+    try:
+        proc = subprocess.run(
+            args, env=env, capture_output=True, text=True, timeout=CLAUDE_TIMEOUT
+        )
+    except subprocess.TimeoutExpired:
+        return "[error] claude timed out"
+
+    out = (proc.stdout or "").strip()
+    # A resume that fails (e.g. session lost after a server rebuild) — fall back
+    # to creating a fresh session id so the meeting keeps working.
+    if proc.returncode != 0 and s.get("cc_started"):
+        cc_sid = str(uuid.uuid4())
+        s["cc_session_id"] = cc_sid
+        s["cc_started"] = False
+        try:
+            proc = subprocess.run(
+                [CLAUDE_BIN, "--session-id", cc_sid, "-p", prompt],
+                env=env, capture_output=True, text=True, timeout=CLAUDE_TIMEOUT,
+            )
+            out = (proc.stdout or "").strip()
+        except subprocess.TimeoutExpired:
+            return "[error] claude timed out"
+
+    if proc.returncode == 0:
+        s["cc_started"] = True
+        _persist(mid)
     if not out and proc.stderr:
         return f"[error] {proc.stderr.strip()[:500]}"
     return out
@@ -162,6 +223,34 @@ def _build_context(mid: str, tail_chars: int = MAX_CONTEXT_CHARS) -> str:
     if len(ctx) > tail_chars:
         ctx = ctx[-tail_chars:]
     return ctx
+
+
+def _cc_delta(mid: str) -> str:
+    """Return only the meeting content NOT yet handed to the persistent CC
+    session (segments + file summaries since the last CC turn), then advance the
+    watermark. Because the CC session already remembers everything up to that
+    point, we only ever push the delta — no full-transcript re-stuffing."""
+    s = SESSIONS[mid]
+    seg_from = s.get("cc_fed_segs", 0)
+    file_from = s.get("cc_fed_files", 0)
+    segs = s.get("segments", [])
+    files = s.get("files", [])
+    lines = []
+    new_files = files[file_from:]
+    if new_files:
+        lines.append("[新上传文件/图片]")
+        for f in new_files:
+            note = f.get("note") or ""
+            lines.append(f"- {f['name']} ({f.get('kind','file')}) {note}")
+    new_segs = segs[seg_from:]
+    if new_segs:
+        lines.append("[新增转写]")
+        for seg in new_segs:
+            lines.append(seg["text"])
+    # advance watermark
+    s["cc_fed_segs"] = len(segs)
+    s["cc_fed_files"] = len(files)
+    return "\n".join(lines)
 
 
 # ---------------- models ----------------
@@ -208,13 +297,40 @@ async def session_start(
     mid = uuid.uuid4().hex[:12]
     SESSIONS[mid] = {
         "title": req.title or time.strftime("会议 %Y-%m-%d %H:%M"),
+        "title_auto": not bool(req.title),  # True = still a placeholder we may auto-name
         "created": _now(),
         "segments": [],
         "files": [],
         "analyses": [],
+        "cc_session_id": str(uuid.uuid4()),  # persistent Claude Code session for this meeting
+        "cc_started": False,
     }
     _persist(mid)
     return {"meeting_id": mid, "title": SESSIONS[mid]["title"]}
+
+
+class RenameReq(BaseModel):
+    title: str
+
+
+@app.post("/session/{mid}/rename")
+async def session_rename(
+    mid: str,
+    req: RenameReq,
+    authorization: Optional[str] = Header(None),
+    x_origin_verify: Optional[str] = Header(None),
+):
+    _require_auth(authorization, x_origin_verify)
+    if mid not in SESSIONS:
+        raise HTTPException(404, "no such meeting")
+    new_title = (req.title or "").strip()
+    if not new_title:
+        raise HTTPException(400, "empty title")
+    SESSIONS[mid]["title"] = new_title
+    SESSIONS[mid]["title_auto"] = False  # user set it explicitly; stop auto-naming
+    _persist(mid)
+    await _publish(mid, {"type": "rename", "title": new_title})
+    return {"ok": True, "title": new_title}
 
 
 @app.post("/session/{mid}/feed")
@@ -250,7 +366,9 @@ async def session_upload(
     dest.write_bytes(raw)
     kind = "image" if (file.content_type or "").startswith("image/") else "file"
     note = ""
-    # If it's an image, let claude describe it for context (path handed to claude).
+    # If it's an image, let claude describe it for context (one-shot; the
+    # description then rides into the meeting's persistent CC session via the
+    # delta on the next ask/summarize).
     if kind == "image":
         desc = await asyncio.to_thread(
             _run_claude,
@@ -274,17 +392,18 @@ async def session_ask(
     _require_auth(authorization, x_origin_verify)
     if mid not in SESSIONS:
         raise HTTPException(404, "no such meeting")
-    ctx = _build_context(mid)
+    delta = _cc_delta(mid)
     prompt = (
-        "你是会议实时助手。以下是目前为止的会议上下文(转写+已上传文件摘要)。"
-        "请基于上下文简洁回答用户的问题,不要编造上下文里没有的信息。\n\n"
-        f"=== 会议上下文 ===\n{ctx}\n\n=== 用户问题 ===\n{req.question}"
+        "你是会议实时助手，你已经在跟进整场会议。"
+        "下面是自上次以来新增的会议内容(可能为空)，先读完再回答。"
+        "请结合整场会议上下文简洁回答用户问题，不要编造没提到的信息。\n\n"
+        f"=== 新增内容 ===\n{delta or '(无)'}\n\n=== 用户问题 ===\n{req.question}"
     )
     job_id = uuid.uuid4().hex[:12]
     JOBS[job_id] = {"status": "pending", "result": "", "kind": "ask", "mid": mid}
 
     async def _work():
-        ans = await asyncio.to_thread(_run_claude, prompt)
+        ans = await asyncio.to_thread(_run_claude_session, mid, prompt)
         SESSIONS[mid]["analyses"].append({"q": req.question, "a": ans, "ts": _now()})
         _persist(mid)
         JOBS[job_id] = {"status": "done", "result": ans, "kind": "ask", "mid": mid}
@@ -303,20 +422,38 @@ async def session_summarize(
     _require_auth(authorization, x_origin_verify)
     if mid not in SESSIONS:
         raise HTTPException(404, "no such meeting")
-    ctx = _build_context(mid)
+    delta = _cc_delta(mid)
     prompt = (
-        "你是会议纪要助手。基于以下完整会议上下文,输出结构化会议总结,用中文,包含:\n"
+        "你是会议纪要助手，你已经全程跟进了这场会议。"
+        "下面是自上次以来新增的会议内容(可能为空)，先读完。然后基于整场会议"
+        "输出结构化会议总结，用中文，包含:\n"
         "1) 一句话概述  2) 关键讨论点(分条)  3) 决定事项  4) 待办/行动项(含负责人如果提到)  "
-        "5) 风险/待确认问题。只用上下文里的信息,不编造。\n\n"
-        f"=== 会议上下文 ===\n{ctx}"
+        "5) 风险/待确认问题。只用会议里的信息,不编造。\n\n"
+        f"=== 新增内容 ===\n{delta or '(无)'}"
     )
     job_id = uuid.uuid4().hex[:12]
     JOBS[job_id] = {"status": "pending", "result": "", "kind": "summary", "mid": mid}
 
     async def _work():
-        summary = await asyncio.to_thread(_run_claude, prompt)
+        summary = await asyncio.to_thread(_run_claude_session, mid, prompt)
         SESSIONS[mid]["summary"] = {"text": summary, "ts": _now()}
         (_meeting_dir(mid) / "summary.md").write_text(summary)
+        # Auto-name the meeting from its content the first time we summarize, but
+        # only if the user never renamed it (title_auto still True).
+        if SESSIONS[mid].get("title_auto") and summary and not summary.startswith("[error]"):
+            try:
+                name = await asyncio.to_thread(
+                    _run_claude_session, mid,
+                    "用不超过 15 个字的一句中文短语给这场会议起个标题，"
+                    "只输出标题本身，不要引号、不要标点、不要任何解释。",
+                )
+                name = (name or "").strip().strip('“”"\'').splitlines()[0][:40]
+                if name:
+                    SESSIONS[mid]["title"] = name
+                    SESSIONS[mid]["title_auto"] = False
+                    await _publish(mid, {"type": "rename", "title": name})
+            except Exception:
+                pass
         _persist(mid)
         JOBS[job_id] = {"status": "done", "result": summary, "kind": "summary", "mid": mid}
         await _publish(mid, {"type": "summary", "summary": summary})

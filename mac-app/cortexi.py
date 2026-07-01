@@ -196,6 +196,10 @@ class LocalUIHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
+        ctype = self.headers.get("Content-Type", "")
+        # ---- multipart file upload from the web UI ----
+        if self.path == "/upload" and ctype.startswith("multipart/form-data"):
+            return self._handle_upload(length, ctype)
         raw = self.rfile.read(length) if length else b"{}"
         try:
             payload = json.loads(raw or b"{}")
@@ -226,6 +230,19 @@ class LocalUIHandler(BaseHTTPRequestHandler):
                 return self._send(200, json.dumps({"ok": True}, ensure_ascii=False))
             except Exception as e:
                 return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
+        if self.path.startswith("/session/") and self.path.endswith("/rename"):
+            mid = self.path[len("/session/"):-len("/rename")].strip("/")
+            title = (payload.get("title") or "").strip()
+            if not title:
+                return self._send(200, json.dumps({"error": "empty"}, ensure_ascii=False))
+            try:
+                self.remote.rename(mid, title)
+                if mid == getattr(self.remote, "meeting_id", None):
+                    with self.state.lock:
+                        self.state.meeting_title = title
+                return self._send(200, json.dumps({"ok": True, "title": title}, ensure_ascii=False))
+            except Exception as e:
+                return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
         if self.path == "/record/start":
             try:
                 self.app.start_recording()
@@ -253,6 +270,53 @@ class LocalUIHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
         return self._send(404, "{}")
+
+    def _handle_upload(self, length, ctype):
+        """Receive a multipart file from the web UI, save to a temp file, and
+        forward it to the remote server via the meeting's upload endpoint."""
+        import tempfile
+        import email
+        try:
+            body = self.rfile.read(length) if length else b""
+            # Build a minimal MIME document so email.parser can split the parts.
+            header = b"Content-Type: " + ctype.encode() + b"\r\n\r\n"
+            msg = email.message_from_bytes(header + body)
+            filename = None
+            filedata = None
+            for part in msg.walk():
+                if part.get_content_maintype() == "multipart":
+                    continue
+                disp = str(part.get("Content-Disposition", "") or "")
+                if "filename=" in disp:
+                    filename = part.get_filename() or "upload.bin"
+                    filedata = part.get_payload(decode=True)
+                    break
+            if filedata is None:
+                return self._send(200, json.dumps({"error": "no file in upload"}, ensure_ascii=False))
+            if not self.remote.meeting_id:
+                self.remote.start(title=None)
+            suffix = os.path.splitext(filename)[1] or ""
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tf:
+                tf.write(filedata)
+                tmp_path = tf.name
+            # rename temp so remote gets the real filename
+            real_path = os.path.join(os.path.dirname(tmp_path), os.path.basename(filename))
+            try:
+                os.replace(tmp_path, real_path)
+            except Exception:
+                real_path = tmp_path
+            res = self.remote.upload(real_path)
+            try:
+                os.remove(real_path)
+            except Exception:
+                pass
+            with self.state.lock:
+                self.state.files.append({"name": os.path.basename(filename)})
+            note = (res or {}).get("file", {}).get("note", "")
+            return self._send(200, json.dumps({"ok": True, "name": os.path.basename(filename), "note": note}, ensure_ascii=False))
+        except Exception as e:
+            return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
+
 
 
 class MeetingCopilotApp(rumps.App):
