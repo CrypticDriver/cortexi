@@ -74,7 +74,7 @@ DEFAULT_CONFIG = {
         "model_path": "~/.meeting-copilot/whisper/ggml-large-v3.bin",
         "whisper_cli": "~/.meeting-copilot/whisper.cpp/build/bin/whisper-cli",
         "language": "zh",
-        "segment_seconds": 30,
+        "segment_seconds": 14,
     },
     "audio": {
         "capture_device": "MeetingCopilot-Aggregate",
