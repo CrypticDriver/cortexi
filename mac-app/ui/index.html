@@ -41,8 +41,25 @@
     <span id="title" style="color:var(--mut)"></span>
     <button id="recBtn" onclick="toggleRec()">● 开始录音</button>
     <button class="ghost" onclick="doSummary()">📝 会后总结</button>
+    <button class="ghost" onclick="openSettings()">⚙️ 设置</button>
   </span>
 </header>
+
+<div id="settingsModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:99;align-items:center;justify-content:center">
+  <div style="background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:22px 24px;width:460px;max-width:92vw">
+    <h2 style="font-size:15px;margin:0 0 4px;text-transform:none;letter-spacing:0;color:var(--fg)">⚙️ 连接设置</h2>
+    <div style="color:var(--mut);font-size:12px;margin-bottom:16px">填入服务端地址和访问令牌，保存后立即生效（无需重启）。</div>
+    <label style="display:block;font-size:12px;color:var(--mut);margin-bottom:5px">Server URL (CloudFront 域名)</label>
+    <input id="cfgUrl" type="text" placeholder="https://xxx.cloudfront.net" style="width:100%;margin-bottom:14px">
+    <label style="display:block;font-size:12px;color:var(--mut);margin-bottom:5px">App Token</label>
+    <input id="cfgToken" type="text" placeholder="mc_xxx（留空=不修改已有 token）" style="width:100%;margin-bottom:8px">
+    <div id="cfgHint" style="font-size:12px;color:var(--mut);min-height:18px;margin-bottom:14px"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="ghost" onclick="closeSettings()">取消</button>
+      <button onclick="saveSettings()">保存并测连接</button>
+    </div>
+  </div>
+</div>
 
 <div class="wrap">
   <div>
@@ -138,6 +155,40 @@ async function doSummary(){
     if(d.error){ alert(d.error); return; }
     document.getElementById('summary').textContent = '正在生成总结…（远程分析中，稍等）';
   }catch(e){ alert('无法连接本地服务：'+e); }
+}
+
+async function openSettings(){
+  const m = document.getElementById('settingsModal');
+  m.style.display = 'flex';
+  document.getElementById('cfgHint').textContent = '';
+  try{
+    const r = await fetch('/config'); const c = await r.json();
+    document.getElementById('cfgUrl').value = c.server_url || '';
+    document.getElementById('cfgToken').value = '';
+    document.getElementById('cfgToken').placeholder = c.token_set
+      ? ('当前：' + c.token_masked + '（留空=不修改）')
+      : 'mc_xxx';
+  }catch(e){}
+}
+function closeSettings(){ document.getElementById('settingsModal').style.display='none'; }
+
+async function saveSettings(){
+  const url = document.getElementById('cfgUrl').value.trim();
+  const token = document.getElementById('cfgToken').value.trim();
+  const hint = document.getElementById('cfgHint');
+  hint.style.color = 'var(--mut)'; hint.textContent = '保存中…';
+  try{
+    const r = await fetch('/config',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({server_url:url, app_token:token})});
+    const d = await r.json();
+    if(d.error){ hint.style.color='#ff6b6b'; hint.textContent='❌ '+d.error; return; }
+    if(d.connected){
+      hint.style.color='var(--ok)'; hint.textContent='✅ 已保存，连接正常！';
+      setTimeout(closeSettings, 900);
+    }else{
+      hint.style.color='#ffb454'; hint.textContent='⚠️ '+(d.detail||'已保存，但连接未通');
+    }
+  }catch(e){ hint.style.color='#ff6b6b'; hint.textContent='❌ 无法连接本地服务：'+e; }
 }
 
 setInterval(refresh, 2000); refresh();

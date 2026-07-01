@@ -27,10 +27,37 @@ HERE = Path(__file__).resolve().parent
 CONFIG_PATH = HERE / "config.json"
 
 
+DEFAULT_CONFIG = {
+    "server_url": "",
+    "app_token": "",
+    "ui_port": 8787,
+    "whisper": {
+        "model_path": "~/.meeting-copilot/whisper/ggml-medium.bin",
+        "whisper_cli": "~/.meeting-copilot/whisper.cpp/build/bin/whisper-cli",
+        "language": "zh",
+        "segment_seconds": 45,
+    },
+    "audio": {"capture_device": "MeetingCopilot-Aggregate", "sample_rate": 16000},
+}
+
+
 def load_config():
-    if not CONFIG_PATH.exists():
-        raise SystemExit("config.json 不存在，请先 cp config.example.json config.json 并填写")
-    return json.loads(CONFIG_PATH.read_text())
+    cfg = json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
+    if CONFIG_PATH.exists():
+        try:
+            user = json.loads(CONFIG_PATH.read_text() or "{}")
+        except Exception:
+            user = {}
+        for k, v in user.items():
+            if isinstance(v, dict) and isinstance(cfg.get(k), dict):
+                cfg[k].update(v)
+            else:
+                cfg[k] = v
+    return cfg
+
+
+def save_config(cfg):
+    CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
 
 
 class AppState:
@@ -79,6 +106,15 @@ class LocalUIHandler(BaseHTTPRequestHandler):
             return self._send(200, html, "text/html; charset=utf-8")
         if self.path == "/state":
             return self._send(200, json.dumps(self.state.snapshot(), ensure_ascii=False))
+        if self.path == "/config":
+            cfg = self.app.cfg
+            tok = cfg.get("app_token", "") or ""
+            masked = (tok[:6] + "…" + tok[-4:]) if len(tok) > 12 else ("已设置" if tok else "")
+            return self._send(200, json.dumps({
+                "server_url": cfg.get("server_url", ""),
+                "token_set": bool(tok),
+                "token_masked": masked,
+            }, ensure_ascii=False))
         return self._send(404, "{}")
 
     def do_POST(self):
@@ -115,6 +151,14 @@ class LocalUIHandler(BaseHTTPRequestHandler):
             try:
                 self.app.trigger_summary()
                 return self._send(200, json.dumps({"ok": True}, ensure_ascii=False))
+            except Exception as e:
+                return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
+        if self.path == "/config":
+            su = (payload.get("server_url") or "").strip()
+            tok = (payload.get("app_token") or "").strip()
+            try:
+                result = self.app.update_config(su, tok)
+                return self._send(200, json.dumps(result, ensure_ascii=False))
             except Exception as e:
                 return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
         return self._send(404, "{}")
@@ -156,6 +200,27 @@ class MeetingCopilotApp(rumps.App):
             rumps.notification(title, subtitle, msg)
         except Exception:
             pass
+
+    def update_config(self, server_url, app_token):
+        """Save server_url/token to config.json and hot-reload RemoteClient."""
+        if server_url:
+            self.cfg["server_url"] = server_url.rstrip("/")
+        # only overwrite token if a non-empty new value is provided
+        if app_token:
+            self.cfg["app_token"] = app_token
+        save_config(self.cfg)
+        # rebuild remote client with new creds
+        self.remote = RemoteClient(self.cfg["server_url"], self.cfg["app_token"],
+                                   self.cfg.get("origin_verify", ""))
+        LocalUIHandler.remote = self.remote
+        # test connection
+        if not self.cfg.get("server_url") or not self.cfg.get("app_token"):
+            return {"saved": True, "connected": False, "detail": "已保存，但 server_url 或 token 为空"}
+        try:
+            h = self.remote.health()
+            return {"saved": True, "connected": True, "detail": json.dumps(h, ensure_ascii=False)}
+        except Exception as e:
+            return {"saved": True, "connected": False, "detail": "连接失败：" + str(e)}
 
     # ---------- shared record/summary (menubar + web UI) ----------
     def start_recording(self):
