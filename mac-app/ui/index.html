@@ -37,7 +37,11 @@
   <h1>CortexI</h1>
   <span id="dot" class="dot"></span>
   <span id="status" class="empty">未录音</span>
-  <span id="title" style="margin-left:auto;color:var(--mut)"></span>
+  <span style="margin-left:auto;display:flex;gap:8px;align-items:center">
+    <span id="title" style="color:var(--mut)"></span>
+    <button id="recBtn" onclick="toggleRec()">● 开始录音</button>
+    <button class="ghost" onclick="doSummary()">📝 会后总结</button>
+  </span>
 </header>
 
 <div class="wrap">
@@ -78,6 +82,9 @@ async function refresh(){
     document.getElementById('dot').className = 'dot' + (s.recording?' rec':'');
     document.getElementById('status').textContent = s.recording?'录音中':'未录音';
     document.getElementById('status').className = s.recording?'':'empty';
+    _recording = !!s.recording;
+    const rb = document.getElementById('recBtn');
+    if(rb){ rb.textContent = s.recording ? '■ 停止录音' : '● 开始录音'; }
     document.getElementById('title').textContent = s.title||'';
     // transcript
     const t = document.getElementById('transcript');
@@ -108,6 +115,29 @@ async function ask(){
     const d = await r.json();
   }catch(e){}
   el.disabled=false; el.focus(); refresh();
+}
+
+let _recording = false;
+async function toggleRec(){
+  const btn = document.getElementById('recBtn');
+  btn.disabled = true;
+  try{
+    const path = _recording ? '/record/stop' : '/record/start';
+    const r = await fetch(path,{method:'POST'});
+    const d = await r.json();
+    if(d.error){ alert('操作失败：'+d.error); }
+  }catch(e){ alert('无法连接本地服务：'+e); }
+  btn.disabled = false;
+  refresh();
+}
+
+async function doSummary(){
+  try{
+    const r = await fetch('/summarize',{method:'POST'});
+    const d = await r.json();
+    if(d.error){ alert(d.error); return; }
+    document.getElementById('summary').textContent = '正在生成总结…（远程分析中，稍等）';
+  }catch(e){ alert('无法连接本地服务：'+e); }
 }
 
 setInterval(refresh, 2000); refresh();

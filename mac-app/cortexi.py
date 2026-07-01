@@ -60,6 +60,7 @@ class LocalUIHandler(BaseHTTPRequestHandler):
     state: AppState = None
     remote: RemoteClient = None
     ui_dir: Path = None
+    app = None  # back-ref to MeetingCopilotApp for record/summary control
 
     def log_message(self, *a):
         pass
@@ -98,6 +99,24 @@ class LocalUIHandler(BaseHTTPRequestHandler):
             with self.state.lock:
                 self.state.answers.append({"q": q, "a": ans})
             return self._send(200, json.dumps({"answer": ans}, ensure_ascii=False))
+        if self.path == "/record/start":
+            try:
+                self.app.start_recording()
+                return self._send(200, json.dumps({"recording": True}, ensure_ascii=False))
+            except Exception as e:
+                return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
+        if self.path == "/record/stop":
+            try:
+                self.app.stop_recording()
+                return self._send(200, json.dumps({"recording": False}, ensure_ascii=False))
+            except Exception as e:
+                return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
+        if self.path == "/summarize":
+            try:
+                self.app.trigger_summary()
+                return self._send(200, json.dumps({"ok": True}, ensure_ascii=False))
+            except Exception as e:
+                return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
         return self._send(404, "{}")
 
 
@@ -128,32 +147,71 @@ class MeetingCopilotApp(rumps.App):
         LocalUIHandler.state = self.state
         LocalUIHandler.remote = self.remote
         LocalUIHandler.ui_dir = HERE / "ui"
+        LocalUIHandler.app = self
         self.httpd = ThreadingHTTPServer(("127.0.0.1", self.ui_port), LocalUIHandler)
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
 
-    # ---------- recording ----------
+    def _notify(self, title, subtitle, msg):
+        try:
+            rumps.notification(title, subtitle, msg)
+        except Exception:
+            pass
+
+    # ---------- shared record/summary (menubar + web UI) ----------
+    def start_recording(self):
+        if self.state.recording:
+            return
+        self.remote.start(title=None)
+        self.transcriber = Transcriber(self.cfg, on_segment=self._on_segment)
+        self.transcriber.start()
+        with self.state.lock:
+            self.state.recording = True
+        try:
+            self.title = "🔴"
+        except Exception:
+            pass
+        self._notify("CortexI", "开始录音", "系统音频+麦克风，本地转写中")
+
+    def stop_recording(self):
+        if not self.state.recording:
+            return
+        if self.transcriber:
+            self.transcriber.stop()
+        with self.state.lock:
+            self.state.recording = False
+        try:
+            self.title = "🧠"
+        except Exception:
+            pass
+        self._notify("CortexI", "已停止录音", "可点『会后总结』生成纪要")
+
+    def trigger_summary(self):
+        if not self.remote.meeting_id:
+            raise RuntimeError("还没有会议，先开始录音或上传文件")
+        self._notify("CortexI", "正在生成总结…", "远程 CC 分析中")
+
+        def run():
+            try:
+                summary = self.remote.summarize()
+            except Exception as e:
+                summary = "[远程错误] %s" % e
+            with self.state.lock:
+                self.state.summary = summary
+            self._notify("CortexI", "总结已生成", "打开本地界面查看")
+        threading.Thread(target=run, daemon=True).start()
+
+    # ---------- menubar callbacks ----------
     def toggle_record(self, sender):
         if not self.state.recording:
             try:
-                self.remote.start(title=None)
+                self.start_recording()
             except Exception as e:
                 rumps.alert("无法连接远程服务", str(e))
                 return
-            self.transcriber = Transcriber(self.cfg, on_segment=self._on_segment)
-            self.transcriber.start()
-            with self.state.lock:
-                self.state.recording = True
             sender.title = "■ 停止录音"
-            self.title = "🔴"
-            rumps.notification("CortexI", "开始录音", "系统音频+麦克风，本地转写中")
         else:
-            if self.transcriber:
-                self.transcriber.stop()
-            with self.state.lock:
-                self.state.recording = False
+            self.stop_recording()
             sender.title = "● 开始录音"
-            self.title = "🧠"
-            rumps.notification("CortexI", "已停止录音", "可点『会后总结』生成纪要")
 
     def _on_segment(self, text):
         # called from audio worker thread
