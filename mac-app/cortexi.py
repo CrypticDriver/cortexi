@@ -52,12 +52,18 @@ DEFAULT_CONFIG = {
     "app_token": "",
     "ui_port": 8787,
     "whisper": {
-        "model_path": "~/.meeting-copilot/whisper/ggml-medium.bin",
+        "model_path": "~/.meeting-copilot/whisper/ggml-large-v3.bin",
         "whisper_cli": "~/.meeting-copilot/whisper.cpp/build/bin/whisper-cli",
         "language": "zh",
-        "segment_seconds": 45,
+        "segment_seconds": 30,
     },
-    "audio": {"capture_device": "MeetingCopilot-Aggregate", "sample_rate": 16000},
+    "audio": {
+        "capture_device": "MeetingCopilot-Aggregate",
+        "sample_rate": 16000,
+        "mode": "dual",
+        "left_is_me": False,
+        "silence_rms": 0.006,
+    },
 }
 
 
@@ -307,12 +313,13 @@ class MeetingCopilotApp(rumps.App):
             self.stop_recording()
             sender.title = "● 开始录音"
 
-    def _on_segment(self, text):
-        # called from audio worker thread
+    def _on_segment(self, text, speaker=""):
+        # called from audio worker thread (speaker: "我"/"对方"/"")
         with self.state.lock:
-            self.state.transcript.append({"text": text})
+            self.state.transcript.append({"text": text, "speaker": speaker})
         try:
-            self.remote.feed(text)
+            payload = f"【{speaker}】{text}" if speaker else text
+            self.remote.feed(payload)
         except Exception:
             pass
 

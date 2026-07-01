@@ -6,7 +6,7 @@ set -euo pipefail
 MC_HOME="${HOME}/.meeting-copilot"
 WHISPER_DIR="${MC_HOME}/whisper.cpp"
 MODEL_DIR="${MC_HOME}/whisper"
-MODEL="${MC_WHISPER_MODEL:-medium}"   # tiny/base/small/medium/large-v3；中文建议 medium 起
+MODEL="${MC_WHISPER_MODEL:-large-v3}"   # tiny/base/small/medium/large-v3；中文会议建议 large-v3（准确度最高）
 
 echo "==> Meeting Copilot 安装开始"
 mkdir -p "${MC_HOME}" "${MODEL_DIR}"
@@ -73,12 +73,19 @@ cat <<'NEXT'
 
 还差两步（手动，一次性）：
 
-【A】建聚合设备（录系统音频+麦克风）
+【A】建聚合设备（录系统音频+麦克风，双声道分离说话人）
   1. 打开「音频 MIDI 设置」(Audio MIDI Setup)
-  2. 左下 + → 「创建聚合设备」，勾选：你的麦克风 + BlackHole 2ch
-  3. 重命名为：MeetingCopilot-Aggregate  （要和 config.json 里的 capture_device 一致）
-  4. 再建一个「多输出设备」勾选 BlackHole 2ch + 你的扬声器/耳机，
-     开会时把系统输出选到这个多输出设备 —— 这样你能听到声音，同时 BlackHole 也拿到系统音频。
+  2. 左下 + → 「创建聚合设备」
+  3. ⚠️ 勾选顺序很重要（决定左右声道 = 谁）：
+       先勾 BlackHole 2ch（→ 左声道 = 对方/系统音频）
+       再勾 你的麦克风（→ 右声道 = 你自己）
+     若实际反了，把 config 里 audio.left_is_me 改成 true 即可对调。
+  4. 重命名为：MeetingCopilot-Aggregate （要和 config 里 capture_device 一致）
+  5. 再建一个「多输出设备」勾选 BlackHole 2ch + 你的扬声器/耳机，
+     开会时把系统输出选到这个多输出设备 —— 你能听到声音，同时 BlackHole 拿到系统音频。
+
+  说话人区分原理：左声道=对方、右声道=你，两轨分别转写并标注「👤对方」「🧑我」。
+  这是物理分离，「你 vs 对方」100% 准确。
 
 【B】填 config.json
   server_url = 你的 CloudFront 域名 (https://xxx.cloudfront.net)

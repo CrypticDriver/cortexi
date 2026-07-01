@@ -19,6 +19,9 @@
   #transcript { max-height:52vh; overflow:auto; }
   .seg { padding:6px 0; border-bottom:1px dashed var(--border); }
   .seg:last-child { border-bottom:none; }
+  .spk { display:inline-block; font-size:11px; font-weight:700; padding:1px 7px; border-radius:6px; margin-right:8px; vertical-align:1px; }
+  .spk.me { background:rgba(91,157,255,.18); color:var(--acc); }
+  .spk.other { background:rgba(62,207,142,.18); color:var(--ok); }
   .files span { display:inline-block; background:#20242e; border:1px solid var(--border); border-radius:8px; padding:3px 9px; margin:3px 4px 3px 0; font-size:12px; }
   .qa { border-left:2px solid var(--acc); padding:4px 0 4px 10px; margin:10px 0; }
   .qa .q { color:var(--acc); font-weight:600; }
@@ -106,7 +109,12 @@ async function refresh(){
     // transcript
     const t = document.getElementById('transcript');
     if(s.transcript && s.transcript.length){
-      t.innerHTML = s.transcript.map(x=>`<div class="seg">${esc(x.text)}</div>`).join('');
+      t.innerHTML = s.transcript.map(x=>{
+        let tag = '';
+        if(x.speaker === '我'){ tag = '<span class="spk me">🧑 我</span>'; }
+        else if(x.speaker === '对方'){ tag = '<span class="spk other">👤 对方</span>'; }
+        return `<div class="seg">${tag}${esc(x.text)}</div>`;
+      }).join('');
       t.scrollTop = t.scrollHeight;
     }
     // files

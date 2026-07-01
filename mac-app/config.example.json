@@ -3,13 +3,16 @@
   "app_token": "REPLACE_WITH_APP_TOKEN",
   "ui_port": 8787,
   "whisper": {
-    "model_path": "~/.meeting-copilot/whisper/ggml-medium.bin",
+    "model_path": "~/.meeting-copilot/whisper/ggml-large-v3.bin",
     "whisper_cli": "~/.meeting-copilot/whisper.cpp/build/bin/whisper-cli",
     "language": "zh",
-    "segment_seconds": 45
+    "segment_seconds": 30
   },
   "audio": {
     "capture_device": "MeetingCopilot-Aggregate",
-    "sample_rate": 16000
+    "sample_rate": 16000,
+    "mode": "dual",
+    "left_is_me": false,
+    "silence_rms": 0.006
   }
 }
