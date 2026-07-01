@@ -23,6 +23,18 @@ class RemoteClient:
         r.raise_for_status()
         return r.json()
 
+    def list_sessions(self):
+        """Return the server-side list of all sessions (for the sidebar)."""
+        r = requests.get(f"{self.base}/sessions", headers=self._headers(), timeout=15)
+        r.raise_for_status()
+        return r.json().get("sessions", [])
+
+    def get_session(self, mid):
+        """Return full state (segments/files/analyses/summary) of one session."""
+        r = requests.get(f"{self.base}/session/{mid}/state", headers=self._headers(), timeout=15)
+        r.raise_for_status()
+        return r.json()
+
     def start(self, title=None):
         r = requests.post(
             f"{self.base}/session/start",

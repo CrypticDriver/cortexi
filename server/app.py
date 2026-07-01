@@ -83,6 +83,38 @@ def _persist(mid: str):
     )
 
 
+def _restore_sessions():
+    """Rebuild the in-memory SESSIONS index from disk on startup so history
+    survives server restarts (added 2026-07-01 for the session sidebar)."""
+    if not DATA_DIR.exists():
+        return
+    for d in DATA_DIR.iterdir():
+        if not d.is_dir():
+            continue
+        f = d / "session.json"
+        if not f.exists():
+            continue
+        try:
+            SESSIONS[d.name] = json.loads(f.read_text() or "{}")
+        except Exception:
+            pass
+
+
+def _session_summaries():
+    """Lightweight list of all sessions for the sidebar (newest first)."""
+    out = []
+    for mid, s in SESSIONS.items():
+        out.append({
+            "meeting_id": mid,
+            "title": s.get("title") or mid,
+            "created": s.get("created", 0),
+            "segments": len(s.get("segments", [])),
+            "has_summary": bool(s.get("summary")),
+        })
+    out.sort(key=lambda x: x.get("created", 0), reverse=True)
+    return out
+
+
 async def _publish(mid: str, event: dict):
     for q in SUBSCRIBERS.get(mid, []):
         try:
@@ -150,6 +182,20 @@ class AskReq(BaseModel):
 @app.get("/health")
 async def health():
     return {"ok": True, "sessions": len(SESSIONS), "claude": CLAUDE_BIN}
+
+
+@app.on_event("startup")
+async def _on_startup():
+    _restore_sessions()
+
+
+@app.get("/sessions")
+async def sessions_list(
+    authorization: Optional[str] = Header(None),
+    x_origin_verify: Optional[str] = Header(None),
+):
+    _require_auth(authorization, x_origin_verify)
+    return {"sessions": _session_summaries()}
 
 
 @app.post("/session/start")

@@ -8,12 +8,26 @@
   :root { --bg:#0f1115; --panel:#171a21; --border:#262b36; --fg:#e6e9ef; --mut:#8b93a3; --acc:#5b9dff; --ok:#3ecf8e; }
   * { box-sizing:border-box; }
   body { margin:0; font:14px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif; background:var(--bg); color:var(--fg); }
-  header { padding:14px 20px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:12px; position:sticky; top:0; background:var(--bg); }
+  header { padding:14px 20px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:12px; position:sticky; top:0; background:var(--bg); z-index:10; }
   header h1 { font-size:16px; margin:0; }
   .dot { width:9px; height:9px; border-radius:50%; background:var(--mut); }
   .dot.rec { background:#ff4d4f; animation:pulse 1.2s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
-  .wrap { display:grid; grid-template-columns: 1fr 380px; gap:16px; padding:16px 20px; max-width:1200px; }
+
+  /* 3-column layout: sidebar | main | aside */
+  .layout { display:grid; grid-template-columns: 240px 1fr 360px; gap:16px; padding:16px 20px; max-width:1400px; }
+
+  /* sidebar */
+  .sidebar { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:10px; height:calc(100vh - 90px); overflow:auto; position:sticky; top:78px; }
+  .sidebar h2 { font-size:12px; letter-spacing:.5px; color:var(--mut); text-transform:uppercase; margin:4px 6px 10px; }
+  .sess { padding:9px 10px; border-radius:8px; cursor:pointer; border:1px solid transparent; margin-bottom:5px; }
+  .sess:hover { background:#1d222c; }
+  .sess.active { background:rgba(91,157,255,.14); border-color:rgba(91,157,255,.4); }
+  .sess.live { border-left:3px solid #ff4d4f; }
+  .sess .st { font-weight:600; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .sess .sm { font-size:11px; color:var(--mut); margin-top:2px; display:flex; gap:8px; }
+  .livebadge { color:#ff4d4f; font-weight:700; }
+
   .panel { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:14px 16px; }
   .panel h2 { font-size:12px; letter-spacing:.5px; color:var(--mut); text-transform:uppercase; margin:0 0 10px; }
   #transcript { max-height:52vh; overflow:auto; }
@@ -32,6 +46,8 @@
   button { background:var(--acc); color:#04122b; border:none; border-radius:8px; padding:9px 14px; font-weight:600; cursor:pointer; }
   button.ghost { background:transparent; color:var(--mut); border:1px solid var(--border); }
   .empty { color:var(--mut); font-style:italic; }
+  .viewing-banner { background:rgba(255,180,84,.12); border:1px solid rgba(255,180,84,.4); color:#ffb454; border-radius:8px; padding:6px 12px; font-size:12px; margin-bottom:12px; display:flex; align-items:center; gap:10px; }
+  .viewing-banner button { padding:3px 10px; font-size:12px; }
 </style>
 </head>
 <body>
@@ -64,18 +80,30 @@
   </div>
 </div>
 
-<div class="wrap">
+<div class="layout">
+  <!-- LEFT: session list -->
+  <div class="sidebar">
+    <h2>会话历史</h2>
+    <div id="sessions"><div class="empty" style="padding:6px">加载中…</div></div>
+  </div>
+
+  <!-- MIDDLE: transcript + summary -->
   <div>
+    <div id="viewingBanner" class="viewing-banner" style="display:none">
+      <span id="viewingText">正在查看历史会话（只读快照）</span>
+      <button class="ghost" onclick="backToLive()">← 回到当前</button>
+    </div>
     <div class="panel">
       <h2>实时转写</h2>
       <div id="transcript"><div class="empty">开始录音后，本地转写会实时出现在这里（音频不出本机）。</div></div>
     </div>
     <div class="panel" style="margin-top:16px">
       <h2>会后总结</h2>
-      <div id="summary"><div class="empty">点菜单栏『📝 会后总结』生成结构化纪要。</div></div>
+      <div id="summary"><div class="empty">点『📝 会后总结』生成结构化纪要。</div></div>
     </div>
   </div>
 
+  <!-- RIGHT: files + Q&A -->
   <div>
     <div class="panel">
       <h2>已上传文件 / 图片</h2>
@@ -94,11 +122,101 @@
 
 <script>
 function esc(s){ return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+function fmtTime(ts){
+  if(!ts) return "";
+  const d = new Date(ts*1000);
+  const p = n => String(n).padStart(2,'0');
+  return `${d.getMonth()+1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 
+// viewingMid = null  -> showing the LIVE session (auto-refresh)
+// viewingMid = "xxx" -> showing a historical snapshot (static)
+let viewingMid = null;
+let currentLiveMid = null;
+let _recording = false;
+
+// ---- sidebar ----
+async function refreshSessions(){
+  try{
+    const r = await fetch('/sessions'); const d = await r.json();
+    currentLiveMid = d.current || null;
+    const box = document.getElementById('sessions');
+    const list = d.sessions || [];
+    if(!list.length){ box.innerHTML = '<div class="empty" style="padding:6px">暂无会话</div>'; return; }
+    box.innerHTML = list.map(s=>{
+      const isLive = (s.meeting_id === currentLiveMid) && _recording;
+      const isActive = (viewingMid === null ? s.meeting_id === currentLiveMid : s.meeting_id === viewingMid);
+      const cls = 'sess' + (isActive?' active':'') + (isLive?' live':'');
+      const live = isLive ? '<span class="livebadge">● LIVE</span>' : '';
+      return `<div class="${cls}" onclick="selectSession('${s.meeting_id}')">
+        <div class="st">${esc(s.title)}</div>
+        <div class="sm">${live}<span>${fmtTime(s.created)}</span><span>${s.segments}段</span>${s.has_summary?'<span>📝</span>':''}</div>
+      </div>`;
+    }).join('');
+  }catch(e){}
+}
+
+function selectSession(mid){
+  if(mid === currentLiveMid){ backToLive(); return; }
+  viewingMid = mid;
+  document.getElementById('viewingBanner').style.display = 'flex';
+  loadHistorical(mid);
+  refreshSessions();
+}
+function backToLive(){
+  viewingMid = null;
+  document.getElementById('viewingBanner').style.display = 'none';
+  refresh();
+  refreshSessions();
+}
+
+async function loadHistorical(mid){
+  try{
+    const r = await fetch('/session/'+mid); const s = await r.json();
+    if(s.error){ return; }
+    document.getElementById('viewingText').textContent = '正在查看历史会话：' + (s.title||mid) + '（只读快照）';
+    renderTranscript((s.segments||[]).map(x=>({text:x.text, speaker:x.speaker})));
+    renderFiles(s.files||[]);
+    renderAnswers((s.analyses||[]).map(x=>({q:x.q, a:x.a})));
+    const sm = (s.summary && s.summary.text) ? s.summary.text : "";
+    document.getElementById('summary').textContent = sm || "（这次会议没有生成总结）";
+  }catch(e){}
+}
+
+// ---- shared renderers ----
+function renderTranscript(segs){
+  const t = document.getElementById('transcript');
+  if(segs && segs.length){
+    t.innerHTML = segs.map(x=>{
+      let tag = '';
+      if(x.speaker === '我'){ tag = '<span class="spk me">🧑 我</span>'; }
+      else if(x.speaker === '对方'){ tag = '<span class="spk other">👤 对方</span>'; }
+      return `<div class="seg">${tag}${esc(x.text)}</div>`;
+    }).join('');
+    t.scrollTop = t.scrollHeight;
+  }else{
+    t.innerHTML = '<div class="empty">（无转写内容）</div>';
+  }
+}
+function renderFiles(files){
+  const f = document.getElementById('files');
+  if(files && files.length){ f.innerHTML = files.map(x=>`<span>📎 ${esc(x.name)}</span>`).join(''); }
+  else { f.innerHTML = '<span class="empty" style="border:none;background:none">无</span>'; }
+}
+function renderAnswers(ans){
+  const qa = document.getElementById('qas');
+  if(ans && ans.length){
+    qa.innerHTML = ans.map(x=>`<div class="qa"><div class="q">Q: ${esc(x.q)}</div><div class="a">${esc(x.a)}</div></div>`).join('');
+  }else{
+    qa.innerHTML = '<div class="empty">开会中随时问，比如「刚才决定了什么？」</div>';
+  }
+}
+
+// ---- live refresh (only when viewing the live session) ----
 async function refresh(){
+  if(viewingMid !== null) return;  // viewing history -> don't overwrite
   try{
     const r = await fetch('/state'); const s = await r.json();
-    // status
     document.getElementById('dot').className = 'dot' + (s.recording?' rec':'');
     document.getElementById('status').textContent = s.recording?'录音中':'未录音';
     document.getElementById('status').className = s.recording?'':'empty';
@@ -106,43 +224,25 @@ async function refresh(){
     const rb = document.getElementById('recBtn');
     if(rb){ rb.textContent = s.recording ? '■ 停止录音' : '● 开始录音'; }
     document.getElementById('title').textContent = s.title||'';
-    // transcript
-    const t = document.getElementById('transcript');
-    if(s.transcript && s.transcript.length){
-      t.innerHTML = s.transcript.map(x=>{
-        let tag = '';
-        if(x.speaker === '我'){ tag = '<span class="spk me">🧑 我</span>'; }
-        else if(x.speaker === '对方'){ tag = '<span class="spk other">👤 对方</span>'; }
-        return `<div class="seg">${tag}${esc(x.text)}</div>`;
-      }).join('');
-      t.scrollTop = t.scrollHeight;
-    }
-    // files
-    const f = document.getElementById('files');
-    if(s.files && s.files.length){ f.innerHTML = s.files.map(x=>`<span>📎 ${esc(x.name)}</span>`).join(''); }
-    // answers
-    const qa = document.getElementById('qas');
-    if(s.answers && s.answers.length){
-      qa.innerHTML = s.answers.map(x=>`<div class="qa"><div class="q">Q: ${esc(x.q)}</div><div class="a">${esc(x.a)}</div></div>`).join('');
-    }
-    // summary
+    renderTranscript(s.transcript||[]);
+    renderFiles(s.files||[]);
+    renderAnswers((s.answers||[]).map(x=>({q:x.q, a:x.a})));
     if(s.summary){ document.getElementById('summary').textContent = s.summary; }
   }catch(e){}
 }
 
 async function ask(){
   const el = document.getElementById('q'); const q = el.value.trim(); if(!q) return;
+  if(viewingMid !== null){ alert('历史会话是只读的，回到当前会话再提问。'); return; }
   el.value=''; el.disabled=true;
   const qa = document.getElementById('qas');
   qa.insertAdjacentHTML('beforeend', `<div class="qa"><div class="q">Q: ${esc(q)}</div><div class="a">思考中…</div></div>`);
   try{
-    const r = await fetch('/ask',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:q})});
-    const d = await r.json();
+    await fetch('/ask',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:q})});
   }catch(e){}
   el.disabled=false; el.focus(); refresh();
 }
 
-let _recording = false;
 async function toggleRec(){
   const btn = document.getElementById('recBtn');
   btn.disabled = true;
@@ -151,12 +251,14 @@ async function toggleRec(){
     const r = await fetch(path,{method:'POST'});
     const d = await r.json();
     if(d.error){ alert('操作失败：'+d.error); }
+    if(!_recording){ backToLive(); }  // starting a new recording -> jump to live
   }catch(e){ alert('无法连接本地服务：'+e); }
   btn.disabled = false;
-  refresh();
+  refresh(); refreshSessions();
 }
 
 async function doSummary(){
+  if(viewingMid !== null){ alert('历史会话已是最终状态；回到当前会话再生成总结。'); return; }
   try{
     const r = await fetch('/summarize',{method:'POST'});
     const d = await r.json();
@@ -192,14 +294,17 @@ async function saveSettings(){
     if(d.error){ hint.style.color='#ff6b6b'; hint.textContent='❌ '+d.error; return; }
     if(d.connected){
       hint.style.color='var(--ok)'; hint.textContent='✅ 已保存，连接正常！';
-      setTimeout(closeSettings, 900);
+      setTimeout(closeSettings, 900); refreshSessions();
     }else{
       hint.style.color='#ffb454'; hint.textContent='⚠️ '+(d.detail||'已保存，但连接未通');
     }
   }catch(e){ hint.style.color='#ff6b6b'; hint.textContent='❌ 无法连接本地服务：'+e; }
 }
 
-setInterval(refresh, 2000); refresh();
+// live content every 2s; session list every 3s
+setInterval(refresh, 2000);
+setInterval(refreshSessions, 3000);
+refresh(); refreshSessions();
 </script>
 </body>
 </html>

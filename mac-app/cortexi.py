@@ -160,7 +160,29 @@ class LocalUIHandler(BaseHTTPRequestHandler):
             html = (self.ui_dir / "index.html").read_text()
             return self._send(200, html, "text/html; charset=utf-8")
         if self.path == "/state":
-            return self._send(200, json.dumps(self.state.snapshot(), ensure_ascii=False))
+            snap = self.state.snapshot()
+            try:
+                snap["meeting_id"] = self.remote.meeting_id
+            except Exception:
+                snap["meeting_id"] = None
+            return self._send(200, json.dumps(snap, ensure_ascii=False))
+        if self.path == "/sessions":
+            try:
+                items = self.remote.list_sessions()
+                return self._send(200, json.dumps({
+                    "sessions": items,
+                    "current": self.remote.meeting_id,
+                }, ensure_ascii=False))
+            except Exception as e:
+                return self._send(200, json.dumps({"sessions": [], "error": str(e)}, ensure_ascii=False))
+        if self.path.startswith("/session/"):
+            mid = self.path[len("/session/"):].strip("/")
+            if mid:
+                try:
+                    data = self.remote.get_session(mid)
+                    return self._send(200, json.dumps(data, ensure_ascii=False))
+                except Exception as e:
+                    return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
         if self.path == "/config":
             cfg = self.app.cfg
             tok = cfg.get("app_token", "") or ""
