@@ -220,7 +220,10 @@ class Transcriber:
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             ran_ok = (r.returncode == 0)
-        except Exception:
+            if not ran_ok:
+                print(f"[whisper] rc={r.returncode} stderr={(r.stderr or '')[:300]}", flush=True)
+        except Exception as e:
+            print(f"[whisper] exception on primary cmd: {e}", flush=True)
             ran_ok = False
         txt_file = Path(out_prefix + ".txt")
         if not ran_ok or not txt_file.exists():
