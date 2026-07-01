@@ -24,7 +24,27 @@ from remote import RemoteClient
 from audio import Transcriber
 
 HERE = Path(__file__).resolve().parent
-CONFIG_PATH = HERE / "config.json"
+
+# Config lives in the user's home dir so it survives app upgrades and stays
+# writable even when running from inside a read-only .app bundle.
+CONFIG_DIR = Path.home() / ".meeting-copilot"
+CONFIG_PATH = CONFIG_DIR / "config.json"
+
+
+def _find_ui_dir():
+    """Locate ui/ whether running as plain script or inside a .app bundle."""
+    candidates = [
+        HERE / "ui",                       # plain: mac-app/ui
+        HERE.parent / "Resources" / "ui",  # py2app: Contents/Resources/ui
+        HERE / "Resources" / "ui",
+    ]
+    for c in candidates:
+        if (c / "index.html").exists():
+            return c
+    return HERE / "ui"
+
+
+UI_DIR = _find_ui_dir()
 
 
 DEFAULT_CONFIG = {
@@ -43,6 +63,14 @@ DEFAULT_CONFIG = {
 
 def load_config():
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
+    # one-time seed: if user config absent but a legacy ./config.json exists, adopt it
+    legacy = HERE / "config.json"
+    if not CONFIG_PATH.exists() and legacy.exists():
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            CONFIG_PATH.write_text(legacy.read_text())
+        except Exception:
+            pass
     if CONFIG_PATH.exists():
         try:
             user = json.loads(CONFIG_PATH.read_text() or "{}")
@@ -57,6 +85,7 @@ def load_config():
 
 
 def save_config(cfg):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
 
 
@@ -190,7 +219,7 @@ class MeetingCopilotApp(rumps.App):
     def _start_ui_server(self):
         LocalUIHandler.state = self.state
         LocalUIHandler.remote = self.remote
-        LocalUIHandler.ui_dir = HERE / "ui"
+        LocalUIHandler.ui_dir = UI_DIR
         LocalUIHandler.app = self
         self.httpd = ThreadingHTTPServer(("127.0.0.1", self.ui_port), LocalUIHandler)
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
