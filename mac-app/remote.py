@@ -35,6 +35,14 @@ class RemoteClient:
         r.raise_for_status()
         return r.json()
 
+    def delete_session(self, mid):
+        """Delete a session (and its data) on the server."""
+        r = requests.delete(f"{self.base}/session/{mid}", headers=self._headers(), timeout=15)
+        r.raise_for_status()
+        if self.meeting_id == mid:
+            self.meeting_id = None
+        return r.json()
+
     def start(self, title=None):
         r = requests.post(
             f"{self.base}/session/start",

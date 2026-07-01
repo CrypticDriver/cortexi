@@ -20,12 +20,15 @@
   /* sidebar */
   .sidebar { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:10px; height:calc(100vh - 90px); overflow:auto; position:sticky; top:78px; }
   .sidebar h2 { font-size:12px; letter-spacing:.5px; color:var(--mut); text-transform:uppercase; margin:4px 6px 10px; }
-  .sess { padding:9px 10px; border-radius:8px; cursor:pointer; border:1px solid transparent; margin-bottom:5px; }
+  .sess { position:relative; padding:9px 10px; border-radius:8px; cursor:pointer; border:1px solid transparent; margin-bottom:5px; }
   .sess:hover { background:#1d222c; }
   .sess.active { background:rgba(91,157,255,.14); border-color:rgba(91,157,255,.4); }
   .sess.live { border-left:3px solid #ff4d4f; }
-  .sess .st { font-weight:600; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .sess .st { font-weight:600; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; padding-right:20px; }
   .sess .sm { font-size:11px; color:var(--mut); margin-top:2px; display:flex; gap:8px; }
+  .sess .del { position:absolute; top:7px; right:7px; display:none; color:var(--mut); background:none; border:none; padding:0 4px; font-size:14px; cursor:pointer; border-radius:4px; }
+  .sess:hover .del { display:block; }
+  .sess .del:hover { color:#ff6b6b; background:rgba(255,107,107,.12); }
   .livebadge { color:#ff4d4f; font-weight:700; }
 
   .panel { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:14px 16px; }
@@ -58,6 +61,7 @@
   <span id="status" class="empty">未录音</span>
   <span style="margin-left:auto;display:flex;gap:8px;align-items:center">
     <span id="title" style="color:var(--mut)"></span>
+    <button onclick="newMeeting()">➕ 新会议</button>
     <button id="recBtn" onclick="toggleRec()">● 开始录音</button>
     <button class="ghost" onclick="doSummary()">📝 会后总结</button>
     <button class="ghost" onclick="openSettings()">⚙️ 设置</button>
@@ -149,6 +153,7 @@ async function refreshSessions(){
       const cls = 'sess' + (isActive?' active':'') + (isLive?' live':'');
       const live = isLive ? '<span class="livebadge">● LIVE</span>' : '';
       return `<div class="${cls}" onclick="selectSession('${s.meeting_id}')">
+        <button class="del" title="删除会议" onclick="event.stopPropagation();deleteSession('${s.meeting_id}','${esc(s.title)}')">✕</button>
         <div class="st">${esc(s.title)}</div>
         <div class="sm">${live}<span>${fmtTime(s.created)}</span><span>${s.segments}段</span>${s.has_summary?'<span>📝</span>':''}</div>
       </div>`;
@@ -168,6 +173,28 @@ function backToLive(){
   document.getElementById('viewingBanner').style.display = 'none';
   refresh();
   refreshSessions();
+}
+
+async function newMeeting(){
+  const title = prompt('新会议标题（可留空，默认用时间）：', '');
+  if(title === null) return;  // cancelled
+  try{
+    const r = await fetch('/meeting/new',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:title.trim()})});
+    const d = await r.json();
+    if(d.error){ alert('新建失败：'+d.error); return; }
+    backToLive();
+  }catch(e){ alert('无法连接本地服务：'+e); }
+}
+
+async function deleteSession(mid, title){
+  if(!confirm('删除会议“'+title+'”？此操作不可恢复。')) return;
+  try{
+    const r = await fetch('/session/'+mid+'/delete',{method:'POST'});
+    const d = await r.json();
+    if(d.error){ alert('删除失败：'+d.error); return; }
+    if(viewingMid === mid){ backToLive(); }
+    refreshSessions();
+  }catch(e){ alert('无法连接本地服务：'+e); }
 }
 
 async function loadHistorical(mid){

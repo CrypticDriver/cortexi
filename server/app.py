@@ -337,6 +337,24 @@ async def session_state(
     return SESSIONS[mid]
 
 
+@app.delete("/session/{mid}")
+async def session_delete(
+    mid: str,
+    authorization: Optional[str] = Header(None),
+    x_origin_verify: Optional[str] = Header(None),
+):
+    _require_auth(authorization, x_origin_verify)
+    SESSIONS.pop(mid, None)
+    import shutil
+    d = DATA_DIR / mid
+    if d.exists():
+        try:
+            shutil.rmtree(d)
+        except Exception:
+            pass
+    return {"ok": True}
+
+
 @app.get("/job/{job_id}")
 async def job_status(
     job_id: str,

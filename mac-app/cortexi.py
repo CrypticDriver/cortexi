@@ -212,6 +212,20 @@ class LocalUIHandler(BaseHTTPRequestHandler):
             with self.state.lock:
                 self.state.answers.append({"q": q, "a": ans})
             return self._send(200, json.dumps({"answer": ans}, ensure_ascii=False))
+        if self.path == "/meeting/new":
+            title = (payload.get("title") or "").strip() or None
+            try:
+                mid = self.app.new_meeting(title)
+                return self._send(200, json.dumps({"ok": True, "meeting_id": mid}, ensure_ascii=False))
+            except Exception as e:
+                return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
+        if self.path.startswith("/session/") and self.path.endswith("/delete"):
+            mid = self.path[len("/session/"):-len("/delete")].strip("/")
+            try:
+                self.remote.delete_session(mid)
+                return self._send(200, json.dumps({"ok": True}, ensure_ascii=False))
+            except Exception as e:
+                return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
         if self.path == "/record/start":
             try:
                 self.app.start_recording()
@@ -299,17 +313,43 @@ class MeetingCopilotApp(rumps.App):
         except Exception as e:
             return {"saved": True, "connected": False, "detail": "连接失败：" + str(e)}
 
+    def new_meeting(self, title=None):
+        """Start a brand-new meeting session. Recording (start/stop) only feeds
+        into the CURRENT meeting; a new session is created only here."""
+        # stop any ongoing capture first so it doesn't bleed into the new meeting
+        if self.state.recording and self.transcriber:
+            self.transcriber.stop()
+            with self.state.lock:
+                self.state.recording = False
+        self.remote.start(title=title)
+        # reset local live view for the fresh meeting
+        with self.state.lock:
+            self.state.transcript = []
+            self.state.files = []
+            self.state.answers = []
+            self.state.summary = ""
+            self.state.meeting_title = title or ""
+        try:
+            self.title = "\U0001f9e0"
+        except Exception:
+            pass
+        return self.remote.meeting_id
+
     # ---------- shared record/summary (menubar + web UI) ----------
     def start_recording(self):
         if self.state.recording:
             return
-        self.remote.start(title=None)
+        # Only create a new session if there is no current meeting yet.
+        # Otherwise, resume feeding into the current meeting (start/stop is just
+        # pause/resume of capture within the same meeting).
+        if not self.remote.meeting_id:
+            self.remote.start(title=None)
         self.transcriber = Transcriber(self.cfg, on_segment=self._on_segment)
         self.transcriber.start()
         with self.state.lock:
             self.state.recording = True
         try:
-            self.title = "🔴"
+            self.title = "\U0001f534"
         except Exception:
             pass
         self._notify("CortexI", "开始录音", "系统音频+麦克风，本地转写中")
