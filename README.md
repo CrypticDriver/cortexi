@@ -6,6 +6,8 @@
 
 CortexI 是常驻 Mac 的「会议副脑」：开会自动录音、本地转写、远程 AI 实时分析、会后自动出结构化纪要。音频永不离开你的电脑，只有文字上传 —— 对 NDA 场景友好。
 
+> ⚠️ **当前状态（2026-07-01）：** 服务端（FastAPI + Bedrock/Claude Code + CloudFront/ALB 安全层）已部署验证。**Mac 客户端代码尚未在真实 Mac 上跑通**（rumps/py2app/whisper.cpp/BlackHole 均为 macOS 专属组件，开发环境为 Linux ARM，无法本地验证）。规划见 [`docs/PRD.md`](docs/PRD.md)。
+
 ```
 Mac 菜单栏 App 🧠
   ├─ 系统音频 + 麦克风 (BlackHole 聚合设备)
