@@ -200,11 +200,18 @@ class Transcriber:
         return False
 
     def _transcribe(self, wav: Path, speaker: str):
+        import sys
+        def D(*a):
+            print("[DBG]", *a, file=sys.stderr, flush=True)
         if not wav.exists() or wav.stat().st_size < 2000:
+            D("skip small/missing", wav)
             return
         # silence gate: skip near-silent tracks (kills whisper hallucination AND
         # gives free speaker turn-taking: whoever is quiet produces nothing)
-        if self._wav_rms(wav) < self.silence_rms:
+        _r = self._wav_rms(wav)
+        D("rms=%.5f gate=%.5f" % (_r, self.silence_rms), wav.name)
+        if _r < self.silence_rms:
+            D("SKIP silence")
             return
         out_prefix = str(wav.with_suffix(""))
         cmd = [
@@ -220,8 +227,10 @@ class Transcriber:
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             ran_ok = (r.returncode == 0)
-        except Exception:
+            D("whisper rc=", r.returncode, "err=", (r.stderr or "")[-200:])
+        except Exception as _e:
             ran_ok = False
+            D("whisper EXC=", repr(_e))
         txt_file = Path(out_prefix + ".txt")
         if not ran_ok or not txt_file.exists():
             minimal = [
@@ -233,12 +242,17 @@ class Transcriber:
             except Exception:
                 self._safe_unlink(txt_file)
                 return
+        else:
+            D("NO txt_file", txt_file)
         if txt_file.exists():
             text = txt_file.read_text().strip()
             cleaned = text.replace("[BLANK_AUDIO]", "").replace("(silence)", "").strip()
+            D("TXT=%r CLEAN=%r halluc=%s" % (text[:60], cleaned[:60],
+              self._looks_hallucinated(cleaned) if cleaned else "NA"))
             if (cleaned and len(cleaned) > 1
                     and not self._looks_hallucinated(cleaned)
                     and cleaned != self._last.get(speaker, "")):
                 self._last[speaker] = cleaned
+                D("EMIT ->", speaker, cleaned[:60])
                 self._emit(cleaned, speaker)
         self._safe_unlink(txt_file)
